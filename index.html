@@ -415,6 +415,18 @@ input[type=range]{flex:1;accent-color:var(--acc)}
     }
     if (buf) out.push(buf);
 
+    /* 长句模式：把相邻短句并成一块。
+       手机语音接口每分段一次都可能吃掉几个字，合并能显著减少分段次数。 */
+    if (max >= 120 && detectLang(s) !== 'en') {
+      var merged = [];
+      out.forEach(function (t) {
+        var last = merged[merged.length - 1];
+        if (last && (last.length + t.length) <= max) merged[merged.length - 1] = last + t;
+        else merged.push(t);
+      });
+      out = merged;
+    }
+
     var fixed = [];
     out.forEach(function (t) {
       t = t.trim();
@@ -443,7 +455,8 @@ input[type=range]{flex:1;accent-color:var(--acc)}
   var TERM_RE = /^(\d{1,3})\s*[.．、]\s*([^：:]{1,28})[：:]\s*([\s\S]+)$/;
   var HEAD_RE = /^(第\s*[0-9一二三四五六七八九十百零〇]+\s*[章节回讲篇部卷]|(?:Chapter|CHAPTER|Part|PART|Section|SECTION)\s+[\dIVXLCivxlc]+)/;
 
-  function parseBook(text, fallbackTitle) {
+  function parseBook(text, fallbackTitle, opts) {
+    var sentenceMax = (opts && opts.sentenceMax) || 0;   // 0 = 按语言自动（中 70 / 英 180）
     var src = String(text || '');
     var lines = src.split('\n').map(function (l) { return l.trim(); });
     var filled = lines.filter(Boolean);
@@ -523,7 +536,7 @@ input[type=range]{flex:1;accent-color:var(--acc)}
 
     var chars = 0;
     segments.forEach(function (s) {
-      s.sentences = splitSentences(s.text);
+      s.sentences = splitSentences(s.text, sentenceMax);
       chars += s.text.replace(/\s/g, '').length;
     });
 
@@ -662,9 +675,9 @@ input[type=range]{flex:1;accent-color:var(--acc)}
   }
 
   /* ---------- 一步到位 ---------- */
-  function parseDocument(raw, title) {
+  function parseDocument(raw, title, opts) {
     var cleaned = cleanText(raw);
-    var book = parseBook(cleaned.text, title);
+    var book = parseBook(cleaned.text, title, opts);
     book.stats = cleaned.stats;
     return book;
   }
@@ -700,7 +713,7 @@ input[type=range]{flex:1;accent-color:var(--acc)}
   var pref = lsGet(K_PREF, {});
   pref = Object.assign({
     rate: 1, volume: 1, voiceURI: '', loopOne: false, recall: false, recallSec: 4,
-    fontSize: 16, sleepMin: 0
+    fontSize: 16, sleepMin: 0, sentenceMax: 0
   }, pref);
   if (typeof lib.forEach !== 'function') lib = [];
   if (typeof prog !== 'object' || !prog) prog = {};
@@ -1096,7 +1109,7 @@ input[type=range]{flex:1;accent-color:var(--acc)}
   /* ================= 文档加载 ================= */
   function parseOf(rec) {
     if (cache[rec.id]) return cache[rec.id];
-    var book = core.parseDocument(rec.raw, rec.title);
+    var book = core.parseDocument(rec.raw, rec.title, { sentenceMax: pref.sentenceMax || 0 });
     book.id = rec.id;
     book.source = rec.source;
     if (!book.segments.length) return null;
@@ -1346,6 +1359,13 @@ input[type=range]{flex:1;accent-color:var(--acc)}
       '<input type="range" id="sRecallSec" min="2" max="12" step="1" value="' + pref.recallSec + '"></div>' +
       '<div class="row"><div class="lbl">字号<div class="hint" id="fsV">' + pref.fontSize + ' px</div></div>' +
       '<input type="range" id="sFs" min="14" max="22" step="1" value="' + pref.fontSize + '"></div>' +
+      '<div class="row"><div class="lbl">朗读分段<div class="hint">手机语音吞字时试试「长句」：分段越少，语音接口吃掉的字越少</div></div>' +
+      '<select id="sChunk">' +
+      [[0, '自动'], [45, '短句 45 字'], [70, '标准 70 字'], [140, '长句 140 字'], [220, '超长 220 字']]
+        .map(function (o) {
+          return '<option value="' + o[0] + '"' + ((pref.sentenceMax || 0) === o[0] ? ' selected' : '') + '>' + o[1] + '</option>';
+        }).join('') +
+      '</select></div>' +
       (rec ? '<button class="ghost" id="sExport">导出清洗后的文本（.txt）</button>' : '') +
       '<button class="ghost danger" id="sClear">清空全部播放进度</button>' +
       '<button class="ghost" id="sClose" style="margin-top:18px">完成</button>',
@@ -1359,6 +1379,16 @@ input[type=range]{flex:1;accent-color:var(--acc)}
         $('#sFs').oninput = function () {
           pref.fontSize = +this.value; $('#fsV').textContent = this.value + ' px';
           document.documentElement.style.setProperty('--fs', pref.fontSize + 'px'); save();
+        };
+        $('#sChunk').onchange = function () {
+          pref.sentenceMax = +this.value; save();
+          var id = P.id;
+          if (!id) { toast('已改为「' + this.options[this.selectedIndex].text + '」，下次打开生效'); return; }
+          pause();
+          saveProgressNow();
+          delete cache[id];
+          openDoc(id);
+          toast('已按「' + this.options[this.selectedIndex].text + '」重新分段');
         };
         $('#sTry').onclick = function () {
           var save2 = !!P.playing; pause();
