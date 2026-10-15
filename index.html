@@ -710,10 +710,15 @@ input[type=range]{flex:1;accent-color:var(--acc)}
 
   var lib = lsGet(K_LIB, []);
   var prog = lsGet(K_PROG, {});
+  var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   var pref = lsGet(K_PREF, {});
   pref = Object.assign({
     rate: 1, volume: 1, voiceURI: '', loopOne: false, recall: false, recallSec: 4,
-    fontSize: 16, sleepMin: 0, sentenceMax: 0
+    fontSize: 16, sleepMin: 0,
+    /* iOS 上「一句一次」会每句吞几个字（实测系统朗读整段读就不吞），
+       所以 iPhone 默认整段连读：把整条交给引擎一次读完。 */
+    sentenceMax: isIOS ? 99999 : 0
   }, pref);
   if (typeof lib.forEach !== 'function') lib = [];
   if (typeof prog !== 'object' || !prog) prog = {};
@@ -798,7 +803,10 @@ input[type=range]{flex:1;accent-color:var(--acc)}
   }
   function pickVoice() {
     var lang = (P.book && P.book.lang === 'en') ? 'en' : 'zh';
-    if (pref.voiceURI) {
+    /* 空字符串 = 跟随系统默认音色（不指定 voice，只给 lang）。
+       系统自带「朗读屏幕」不吞字，用的就是这个默认音色。 */
+    if (!pref.voiceURI) return null;
+    if (pref.voiceURI !== 'auto') {
       for (var i = 0; i < P.voices.length; i++) if (P.voices[i].voiceURI === pref.voiceURI) return P.voices[i];
     }
     return bestVoice(lang);
@@ -996,7 +1004,7 @@ input[type=range]{flex:1;accent-color:var(--acc)}
     if (!P.playing || P.phase === 'pause' || !synth) return;
     if (synth.speaking || synth.pending) { P.startedAt = Date.now(); return; }
     var quietFor = Date.now() - (P.startedAt || 0);
-    var budget = Math.max(4000, (P.expectedMs || 4000) * 2.5);
+    var budget = Math.max(4000, (P.expectedMs || 4000) * 1.8);
     if (quietFor > budget) { P.startedAt = Date.now(); speakSentenceNow(); }
   }, 1500);
 
@@ -1338,7 +1346,8 @@ input[type=range]{flex:1;accent-color:var(--acc)}
 
   /* ================= 设置 ================= */
   function openSettings() {
-    var opts = '<option value="">自动选择（推荐）</option>';
+    var opts = '<option value="">跟随系统默认音色（推荐）</option>' +
+      '<option value="auto">让网页自己挑（自动）</option>';
     voiceOptions().forEach(function (v) {
       opts += '<option value="' + esc(v.voiceURI) + '"' + (pref.voiceURI === v.voiceURI ? ' selected' : '') + '>' +
         esc(v.name + ' (' + v.lang + ')') + '</option>';
@@ -1361,7 +1370,8 @@ input[type=range]{flex:1;accent-color:var(--acc)}
       '<input type="range" id="sFs" min="14" max="22" step="1" value="' + pref.fontSize + '"></div>' +
       '<div class="row"><div class="lbl">朗读分段<div class="hint">手机语音吞字时试试「长句」：分段越少，语音接口吃掉的字越少</div></div>' +
       '<select id="sChunk">' +
-      [[0, '自动'], [45, '短句 45 字'], [70, '标准 70 字'], [140, '长句 140 字'], [220, '超长 220 字']]
+      [[99999, '整段连读（推荐 iPhone）'], [0, '自动（按语言）'], [45, '短句 45 字'],
+       [70, '标准 70 字'], [140, '长句 140 字'], [220, '超长 220 字']]
         .map(function (o) {
           return '<option value="' + o[0] + '"' + ((pref.sentenceMax || 0) === o[0] ? ' selected' : '') + '>' + o[1] + '</option>';
         }).join('') +
