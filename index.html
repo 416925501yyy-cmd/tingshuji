@@ -829,7 +829,7 @@ input[type=range]{flex:1;accent-color:var(--acc)}
         toast('这台设备的语音朗读没生效：请在「设置」里换个音色试试，或确认系统里装了中文语音', 6000);
         return;
       }
-      speakCurrent();   /* 原地重试同一句，绝不跳过内容 */
+      pumpSpeech(120);  /* 原地重试同一句，绝不跳过内容（同样不能在回调里直接 speak） */
     };
     P.lastTick = Date.now();
     P.startedAt = Date.now();
@@ -845,7 +845,8 @@ input[type=range]{flex:1;accent-color:var(--acc)}
     try { synth && synth.cancel(); } catch (e) {}
   }
 
-  function speakCurrent() {
+  /** 立刻朗读「当前这一句」（调用方必须先确认引擎空闲） */
+  function speakSentenceNow() {
     if (!P.playing || !P.book) return;
     var seg = curSeg();
     if (!seg) return stopAll();
@@ -857,12 +858,34 @@ input[type=range]{flex:1;accent-color:var(--acc)}
     paint();
   }
 
+  /**
+   * 统一的「下一句」调度，专治 iOS 的两个坑：
+   * 1) 在 onend 回调里直接 speak 下一句会被系统吞掉 → 整句消失（这就是「连续朗读时也跳字」）
+   * 2) 引擎还没空就去 speak → 被排进队列，造成重复念/串行
+   * 所以：先离开回调（setTimeout），等引擎真空闲，再念；只有真卡死才强掐。
+   */
+  function pumpSpeech(delay) {
+    clearTimeout(P.pumpTimer);
+    P.pumpTimer = setTimeout(function () {
+      if (!P.playing || !P.book || !synth) return;
+      if (synth.speaking || synth.pending) {
+        P.pumpWaited = (P.pumpWaited || 0) + 120;
+        if (P.pumpWaited < 2400) { pumpSpeech(120); return; }
+        P.pumpWaited = 0;               /* 真卡住了：掐掉，重念当前句 */
+        P.token++;
+        try { synth.cancel(); } catch (e) {}
+      }
+      P.pumpWaited = 0;
+      speakSentenceNow();
+    }, delay === undefined ? 80 : delay);
+  }
+
   function onSentenceEnd() {
     if (!P.playing) return;
     var list = curSeg().sentences;
     P.sent++;
-    if (P.sent < list.length) { saveProgress(); speakCurrent(); return; }
-    if (pref.loopOne) { P.loopCount++; P.sent = 0; saveProgress(); speakCurrent(); return; }
+    if (P.sent < list.length) { saveProgress(); pumpSpeech(60); return; }
+    if (pref.loopOne) { P.loopCount++; P.sent = 0; saveProgress(); pumpSpeech(60); return; }
     nextSeg(1, true);
   }
 
@@ -880,17 +903,13 @@ input[type=range]{flex:1;accent-color:var(--acc)}
   }
 
   function startSeg(skipRecall) {
-    var again = function () { startSeg(skipRecall); };
-    /* 关键修复：上一次的朗读如果还没结束，必须掐掉再开始新的一句。
-       否则旧音频继续念、新句子被排在它后面，听起来就是漏字/串行。 */
-    if (synth && (synth.speaking || synth.pending)) {
-      cutSpeech();
-      P.startTimer = setTimeout(function () { if (P.playing) again(); }, 150);
-      return;
-    }
+    if (!P.playing) return;
     var seg = curSeg();
     if (pref.recall && !skipRecall && seg.title && P.sent === 0) { doRecall(); return; }
-    speakCurrent();
+    /* 上一次的朗读如果还没结束，先掐掉再开始新的一句；
+       否则旧音频继续念、新句子被排在它后面，听起来就是漏字/串行。 */
+    if (synth && (synth.speaking || synth.pending)) { cutSpeech(); pumpSpeech(150); return; }
+    speakSentenceNow();
   }
 
   function doRecall() {
@@ -902,7 +921,7 @@ input[type=range]{flex:1;accent-color:var(--acc)}
       P.waitTimer = setTimeout(function () {
         if (!P.playing) return;
         P.phase = 'read';
-        speakCurrent();
+        pumpSpeech(40);
       }, Math.max(1, pref.recallSec) * 1000);
     });
   }
@@ -924,13 +943,15 @@ input[type=range]{flex:1;accent-color:var(--acc)}
     applyTimer();
     keepAwake(true);
     paint();
-    if (P.phase === 'pause') { speakCurrent(); return; }
-    speakCurrent();
+    /* 用户点按钮是一次手势，直接发声最稳（iOS 首次朗读需要手势上下文） */
+    speakSentenceNow();
   }
   function pause() {
     P.playing = false;
     clearTimeout(P.waitTimer);
     clearTimeout(P.startTimer);
+    clearTimeout(P.pumpTimer);
+    P.pumpWaited = 0;
     cutSpeech();
     keepAwake(false);
     P.phase = 'idle';
@@ -963,7 +984,7 @@ input[type=range]{flex:1;accent-color:var(--acc)}
     if (synth.speaking || synth.pending) { P.startedAt = Date.now(); return; }
     var quietFor = Date.now() - (P.startedAt || 0);
     var budget = Math.max(4000, (P.expectedMs || 4000) * 2.5);
-    if (quietFor > budget) { P.startedAt = Date.now(); speakCurrent(); }
+    if (quietFor > budget) { P.startedAt = Date.now(); speakSentenceNow(); }
   }, 1500);
 
   /* ================= 定时停止 ================= */
@@ -1428,7 +1449,7 @@ input[type=range]{flex:1;accent-color:var(--acc)}
     lsSet(K_PREF, pref);
     updateCtrlLabels();
     toast('语速 ' + pref.rate.toFixed(2) + '×');
-    if (P.playing) { cutSpeech(); setTimeout(function () { if (P.playing) speakCurrent(); }, 150); }
+    if (P.playing) { cutSpeech(); pumpSpeech(150); }
   };
   $('#btnLoop').onclick = function () {
     pref.loopOne = !pref.loopOne; lsSet(K_PREF, pref);
