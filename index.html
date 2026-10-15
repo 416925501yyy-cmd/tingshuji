@@ -810,7 +810,13 @@ input[type=range]{flex:1;accent-color:var(--acc)}
     u.rate = pref.rate; u.volume = pref.volume; u.pitch = 1;
     var once = function () { if (tok === P.token && cb) cb(); };
     u.onend = once;
-    u.onstart = function () { P.failCount = 0; };
+    u.onstart = function () {
+      P.failCount = 0;
+      P.startedAt = Date.now();
+      /* 按字数估算这句话该念多久，供「卡死守护」判断用（iOS 的 speaking 标志不可靠） */
+      var cps = (P.book && P.book.lang === 'en') ? 13 : 5.2;
+      P.expectedMs = text.length / cps / (pref.rate || 1) * 1000 + 1500;
+    };
     u.onerror = function (e) {
       if (tok !== P.token) return;
       if (e && (e.error === 'canceled' || e.error === 'interrupted')) return;
@@ -826,7 +832,17 @@ input[type=range]{flex:1;accent-color:var(--acc)}
       speakCurrent();   /* 原地重试同一句，绝不跳过内容 */
     };
     P.lastTick = Date.now();
+    P.startedAt = Date.now();
+    var cps0 = (P.book && P.book.lang === 'en') ? 13 : 5.2;
+    P.expectedMs = text.length / cps0 / (pref.rate || 1) * 1000 + 1500;
     try { synth.speak(u); } catch (e) { toast('朗读失败：' + e.message); }
+  }
+
+  /** 立刻掐断正在朗读的内容（跳转/切条/换速时必须先做） */
+  function cutSpeech() {
+    P.token++;
+    clearTimeout(P.startTimer);
+    try { synth && synth.cancel(); } catch (e) {}
   }
 
   function speakCurrent() {
@@ -860,6 +876,18 @@ input[type=range]{flex:1;accent-color:var(--acc)}
     saveProgress();
     paint(true);
     if (!P.playing) return;
+    startSeg(skipRecall);
+  }
+
+  function startSeg(skipRecall) {
+    var again = function () { startSeg(skipRecall); };
+    /* 关键修复：上一次的朗读如果还没结束，必须掐掉再开始新的一句。
+       否则旧音频继续念、新句子被排在它后面，听起来就是漏字/串行。 */
+    if (synth && (synth.speaking || synth.pending)) {
+      cutSpeech();
+      P.startTimer = setTimeout(function () { if (P.playing) again(); }, 150);
+      return;
+    }
     var seg = curSeg();
     if (pref.recall && !skipRecall && seg.title && P.sent === 0) { doRecall(); return; }
     speakCurrent();
@@ -901,9 +929,9 @@ input[type=range]{flex:1;accent-color:var(--acc)}
   }
   function pause() {
     P.playing = false;
-    P.token++;
     clearTimeout(P.waitTimer);
-    try { synth && synth.cancel(); } catch (e) {}
+    clearTimeout(P.startTimer);
+    cutSpeech();
     keepAwake(false);
     P.phase = 'idle';
     saveProgress();
@@ -926,11 +954,16 @@ input[type=range]{flex:1;accent-color:var(--acc)}
     } catch (e) {}
   }
 
-  /* 浏览器偶发卡死/不回调时的兜底 */
+  /* 浏览器偶发卡死/不回调时的兜底。
+     注意：iOS 在真正朗读时 speechSynthesis.speaking 有时也是 false，
+     所以不能只看这个标志，必须结合「这句话按字数估算要念多久」再判断，
+     否则会把正在念的句子重念一遍，听起来就是读错/跳字。 */
   setInterval(function () {
     if (!P.playing || P.phase === 'pause' || !synth) return;
-    if (synth.speaking || synth.pending) { P.lastTick = Date.now(); return; }
-    if (Date.now() - P.lastTick > 3500) { P.lastTick = Date.now(); speakCurrent(); }
+    if (synth.speaking || synth.pending) { P.startedAt = Date.now(); return; }
+    var quietFor = Date.now() - (P.startedAt || 0);
+    var budget = Math.max(4000, (P.expectedMs || 4000) * 2.5);
+    if (quietFor > budget) { P.startedAt = Date.now(); speakCurrent(); }
   }, 1500);
 
   /* ================= 定时停止 ================= */
@@ -1395,7 +1428,7 @@ input[type=range]{flex:1;accent-color:var(--acc)}
     lsSet(K_PREF, pref);
     updateCtrlLabels();
     toast('语速 ' + pref.rate.toFixed(2) + '×');
-    if (P.playing) { P.token++; try { synth.cancel(); } catch (e) {} setTimeout(speakCurrent, 120); }
+    if (P.playing) { cutSpeech(); setTimeout(function () { if (P.playing) speakCurrent(); }, 150); }
   };
   $('#btnLoop').onclick = function () {
     pref.loopOne = !pref.loopOne; lsSet(K_PREF, pref);
